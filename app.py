@@ -137,6 +137,25 @@ def to_numeric(series: pd.Series) -> pd.Series:
     )
 
 
+def normalize_percent_series(series: pd.Series) -> pd.Series:
+    """Excel often stores percentages as fractions (0.15 = 15%). Scale to 0–100 for filters."""
+    s = pd.to_numeric(series, errors="coerce")
+    out = s.copy()
+    mask = out.notna() & (out.abs() < 1)
+    out.loc[mask] = out.loc[mask] * 100.0
+    return out
+
+
+def format_margin_pct(m: Any) -> str:
+    """Display margins as percent with two decimals (e.g., 11.20%)."""
+    if pd.isna(m):
+        return "NA"
+    try:
+        return f"{float(m):.2f}%"
+    except (TypeError, ValueError):
+        return "NA"
+
+
 def safe_str(x: Any) -> str:
     if x is None:
         return ""
@@ -162,7 +181,10 @@ def merge_comparables_and_ratios(comparables_df: pd.DataFrame, ratios_df: pd.Dat
     ratio_company = resolve_column(ratios_df, ["Company Name", "Name", "Company", "CompanyName"])
     rpt_col = resolve_column(ratios_df, ["RPT %", "RPT Percentage", "Related Party Transactions %", "Related Party Transactions"])
     margin_col = resolve_column(ratios_df, ["Operating Profit Margin", "OPM", "OP/OC", "Operating Margin", "Margin"])
-    turnover_col = resolve_column(ratios_df, ["Turnover", "Sales", "Revenue", "Operating Revenue", "Total Revenue"])
+    turnover_col = resolve_column(
+        ratios_df,
+        ["Turnover (Cr)", "Turnover(Cr)", "Turnover Cr", "Turnover", "Sales", "Revenue", "Operating Revenue", "Total Revenue"],
+    )
     turnover_growth_col = resolve_column(ratios_df, ["Turnover Growth %", "Sales Growth %", "Revenue Growth %", "YoY Growth %", "Growth %"])
     extraordinary_col = resolve_column(
         comparables_df, ["Extraordinary Events", "Merger", "Acquisition", "Demerger", "Amalgamation", "Exceptional Items"]
@@ -191,8 +213,8 @@ def merge_comparables_and_ratios(comparables_df: pd.DataFrame, ratios_df: pd.Dat
     ratios = ratios_df[ratios_keep].copy().rename(columns=rename_map)
 
     merged = comp.merge(ratios, on="Company Name", how="left")
-    merged["RPT %"] = to_numeric(merged["RPT %"])
-    merged["Margin"] = to_numeric(merged["Margin"])
+    merged["RPT %"] = normalize_percent_series(to_numeric(merged["RPT %"]))
+    merged["Margin"] = normalize_percent_series(to_numeric(merged["Margin"]))
     if "Turnover" in merged.columns:
         merged["Turnover"] = to_numeric(merged["Turnover"])
     if "Turnover Growth %" in merged.columns:
@@ -208,12 +230,12 @@ def weighted_average(margins: pd.Series, weights: Optional[pd.Series]) -> Option
     if m.empty:
         return None
     if weights is None:
-        return float(m.mean())
-    w = weights.loc[m.index].astype(float)
+        return float(np.average(m.astype(float)))
+    w = pd.to_numeric(weights.loc[m.index], errors="coerce").astype(float)
     w = w.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    if float(w.sum()) <= 0:
-        return float(m.mean())
-    return float((m * w).sum() / w.sum())
+    if float(np.sum(w)) <= 0:
+        return float(np.average(m.astype(float)))
+    return float(np.average(m.astype(float), weights=w))
 
 
 def normalize_bucket(bucket: str) -> str:
@@ -236,29 +258,30 @@ def build_pdf(
     tested_party_margin: Optional[float],
 ) -> bytes:
     pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+    content_w = pdf.w - 2 * pdf.l_margin
     pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 10, "Benchmarking Memorandum (Rule 10B - Income-tax Rules, 1962)", ln=True)
+    pdf.cell(content_w, 10, "Benchmarking Memorandum (Rule 10B - Income-tax Rules, 1962)", ln=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.cell(0, 8, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC", ln=True)
+    pdf.cell(content_w, 8, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC", ln=True)
     pdf.ln(2)
-    pdf.multi_cell(0, 6, "Disclaimer: Data processed in-memory. Zero-retention policy active.")
+    pdf.multi_cell(content_w, 6, "Disclaimer: Data processed in-memory. Zero-retention policy active.")
     pdf.ln(2)
 
     accepted = int((results["Status"] == "Accept").sum())
     rejected = int((results["Status"] == "Reject").sum())
-    pdf.cell(0, 8, f"Accepted comparables: {accepted} | Rejected comparables: {rejected}", ln=True)
+    pdf.cell(content_w, 8, f"Accepted comparables: {accepted} | Rejected comparables: {rejected}", ln=True)
     if alr_low is not None and alr_high is not None:
-        pdf.cell(0, 8, f"Final Arm's Length Range (35th-65th): {alr_low:.2f}% - {alr_high:.2f}%", ln=True)
+        pdf.cell(content_w, 8, f"Final Arm's Length Range (35th-65th): {alr_low:.2f}% - {alr_high:.2f}%", ln=True)
     else:
-        pdf.cell(0, 8, "Final Arm's Length Range (35th-65th): Not available", ln=True)
+        pdf.cell(content_w, 8, "Final Arm's Length Range (35th-65th): Not available", ln=True)
     if weighted_avg is not None:
-        pdf.cell(0, 8, f"Weighted average margin (final set): {weighted_avg:.2f}%", ln=True)
+        pdf.cell(content_w, 8, f"Weighted average margin (final set): {weighted_avg:.2f}%", ln=True)
     if tested_party_margin is not None and safe_harbor_flag is not None and weighted_avg is not None:
         sh = "YES" if safe_harbor_flag else "NO"
         pdf.cell(
-            0,
+            content_w,
             8,
             f"Safe harbor check (±3% vs weighted average): {sh} (Tested party: {tested_party_margin:.2f}%)",
             ln=True,
@@ -266,26 +289,26 @@ def build_pdf(
     pdf.ln(2)
 
     pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 8, "1. Profile of the Tested Party (FAR Analysis)", ln=True)
+    pdf.cell(content_w, 8, "1. Profile of the Tested Party (FAR Analysis)", ln=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.multi_cell(0, 6, far_analysis.strip() or "Not provided.")
+    pdf.multi_cell(content_w, 6, far_analysis.strip() or "Not provided.")
     pdf.ln(1)
 
     pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 8, "2. Search Methodology (Prowess/Capitaline)", ln=True)
+    pdf.cell(content_w, 8, "2. Search Methodology (Prowess/Capitaline)", ln=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.multi_cell(0, 6, ("Keywords used:\n" + prowess_keywords.strip()) if prowess_keywords.strip() else "Keywords used: Not provided.")
+    pdf.multi_cell(content_w, 6, ("Keywords used:\n" + prowess_keywords.strip()) if prowess_keywords.strip() else "Keywords used: Not provided.")
     pdf.ln(1)
 
     pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 8, "3. Qualitative Screening Criteria Applied (Rule 10B - Comparability Factors)", ln=True)
+    pdf.cell(content_w, 8, "3. Qualitative Screening Criteria Applied (Rule 10B - Comparability Factors)", ln=True)
     pdf.set_font("Helvetica", "", 10)
     for c in qualitative_criteria:
-        pdf.multi_cell(0, 6, f"- {c}")
+        pdf.multi_cell(content_w, 6, f"- {c}")
     pdf.ln(1)
 
     pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 8, "4. Annexure: Detailed Accept/Reject Matrix with Tax-Technical Justifications", ln=True)
+    pdf.cell(content_w, 8, "4. Annexure: Detailed Accept/Reject Matrix with Tax-Technical Justifications", ln=True)
     pdf.ln(1)
 
     pdf.set_font("Helvetica", "B", 10)
@@ -293,7 +316,8 @@ def build_pdf(
     pdf.cell(20, 8, "Margin", border=1)
     pdf.cell(22, 8, "Status", border=1)
     pdf.cell(30, 8, "Bucket", border=1)
-    pdf.cell(0, 8, "Reason", border=1, ln=True)
+    reason_w = max(20.0, content_w - 64 - 20 - 22 - 30)
+    pdf.cell(reason_w, 8, "Reason", border=1, ln=True)
     pdf.set_font("Helvetica", "", 9)
 
     for _, row in results.iterrows():
@@ -306,7 +330,7 @@ def build_pdf(
         pdf.cell(20, 7, margin, border=1)
         pdf.cell(22, 7, status, border=1)
         pdf.cell(30, 7, bucket, border=1)
-        pdf.cell(0, 7, reason, border=1, ln=True)
+        pdf.cell(reason_w, 7, reason, border=1, ln=True)
 
     return bytes(pdf.output(dest="S"))
 
@@ -407,10 +431,10 @@ def process_data(
     weights = None
     weights_note = "Weighted average computed using simple mean (no turnover weights found)."
     if "Turnover" in working.columns:
-        w = working.loc[output["Status"] == "Accept", "Turnover"]
+        w = pd.to_numeric(working.loc[output["Status"] == "Accept", "Turnover"], errors="coerce")
         if w.notna().any():
-            weights = w
-            weights_note = "Weighted average computed using turnover as weights."
+            weights = w.astype(float)
+            weights_note = "Weighted average computed using np.average with turnover (Turnover / Turnover Cr) as weights."
 
     weighted_avg = weighted_average(accepted_margins, weights)
     safe_harbor_flag = None
@@ -546,7 +570,9 @@ def main() -> None:
                     filtered_df["Company Name"].astype(str).str.contains(search_term, case=False, na=False)
                     | filtered_df["Reason"].astype(str).str.contains(search_term, case=False, na=False)
                 ]
-            st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+            display_df = filtered_df.copy()
+            display_df["Margin"] = display_df["Margin"].apply(format_margin_pct)
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
 
             st.markdown("### Reasoning Chain (Accepted Companies)")
             accepted_rows = result_df[result_df["Status"] == "Accept"].copy()
@@ -554,7 +580,11 @@ def main() -> None:
                 st.caption("No accepted comparables to explain.")
             else:
                 for _, r in accepted_rows.iterrows():
-                    title = f"{r['Company Name']} — Margin: {r['Margin']:.2f}%" if pd.notna(r["Margin"]) else f"{r['Company Name']}"
+                    title = (
+                        f"{r['Company Name']} — Margin: {format_margin_pct(r['Margin'])}"
+                        if pd.notna(r["Margin"])
+                        else f"{r['Company Name']}"
+                    )
                     with st.expander(title, expanded=False):
                         chain = safe_str(r.get("Reasoning Chain"))
                         kw = safe_str(r.get("Matched Keywords"))
