@@ -431,7 +431,6 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Configuration")
-        api_key = st.text_input("OpenAI API Key", type="password", help="Used only for this run-time session.")
         st.subheader("Project Info")
         st.caption("Automates quantitative filters and qualitative TP comparability checks.")
         st.caption("Best used with Prowess/Capitaline Excel exports containing margin and RPT fields.")
@@ -485,9 +484,6 @@ def main() -> None:
         if not sheet_comp or not sheet_ratios:
             st.error("Please select both the Comparables Data sheet and Financial Ratios sheet.")
             return
-        if not api_key.strip():
-            st.error("Please provide an OpenAI API key.")
-            return
 
         qualitative_criteria = [
             "Functional comparability (services vs products; software service provider vs software product/IP owner).",
@@ -503,6 +499,9 @@ def main() -> None:
                 comparables_df = pd.read_excel(xls, sheet_name=sheet_comp)
                 ratios_df = pd.read_excel(xls, sheet_name=sheet_ratios)
                 merged_df = merge_comparables_and_ratios(comparables_df, ratios_df)
+                api_key = st.secrets["OPENAI_API_KEY"]
+                if not str(api_key).strip():
+                    raise KeyError("OPENAI_API_KEY is empty")
                 client = OpenAI(api_key=api_key)
                 result_df, alr_low, alr_high, wavg, safe_harbor_flag, weights_note = process_data(
                     merged_df,
@@ -510,6 +509,11 @@ def main() -> None:
                     far_analysis,
                     tested_party_margin=float(tested_party_margin),
                 )
+            except KeyError:
+                st.error(
+                    "Missing secret: OPENAI_API_KEY. Add it in Streamlit Cloud Dashboard -> App Settings -> Secrets."
+                )
+                return
             except Exception as exc:
                 st.error(f"Processing failed: {exc}")
                 return
